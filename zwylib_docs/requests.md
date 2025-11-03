@@ -1,0 +1,281 @@
+# Requests
+`zwylib.Requests`[](#zwylibrequests)
+------------------------------------
+
+A utility class providing static methods for interacting with Telegram’s API, including fetching message history, searching messages, managing chat settings, banning/unbanning users, and more.
+
+**Note**: Additional parameters for methods using `Requests.send` (e.g., `search_messages`, `unban`, `change_slowmode`, `get_chat_participant`, `ban`) should be passed as keyword arguments (`keyword=value`) matching the fields in the corresponding TL schema .
+
+### Static Methods[](#static-methods)
+
+#### `search_messages`[](#search_messages)
+
+```
+Requests.search_messages(
+    peer_id: int,
+    callback: Optional[(List[TLRPC.TL_message] | None, TLRPC.TL_error | None) -> None] = None,
+    from_id: Optional[int] = None,
+    top_msg_id: Optional[int] = None,
+    saved_peer_id: Optional[int] = None,
+    saved_reaction: Optional[TLRPC.Reaction] = None,
+    filter: TLRPC.TL_inputMessagesFilter = TLRPC.TL_inputMessagesFilterEmpty(),
+    delay: int = 0,
+    **kwargs
+) -> None
+```
+
+
+Asynchronously searches for messages in a peer based on specified criteria and passes the result to the provided callback. Additional parameters (e.g., `q`, `offset_id`, `add_offset`, `max_id`, `min_id`, `min_date`, `max_date`, `limit`) should be passed as keyword arguments matching the TL schema .
+
+**Arguments**
+
+*   `peer_id` (`int`): ID of the peer to search in.
+*   `callback` (`Optional[(List[TLRPC.TL_message] | None, TLRPC.TL_error | None) -> None]`, default `None`): Function called with the list of messages (or `None`) and an error (or `None`).
+*   `from_id` (`Optional[int]`, default `None`): ID of the sender to filter messages by.
+*   `top_msg_id` (`Optional[int]`, default `None`): ID of the top message for topic-based search.
+*   `saved_peer_id` (`Optional[int]`, default `None`): ID of the saved messages peer.
+*   `saved_reaction` (`Optional[TLRPC.Reaction]`, default `None`): Reaction to filter messages by.
+*   `filter` (`TLRPC.TL_inputMessagesFilter`, default `TLRPC.TL_inputMessagesFilterEmpty`): Filter for message types.
+*   `delay` (`int`, default `0`): Delay in seconds before sending the request.
+*   `**kwargs`: Additional parameters matching the TL schema (e.g., `q`, `offset_id`, `add_offset`, `max_id`, `min_id`, `min_date`, `max_date`, `limit`).
+
+**Example**
+
+```
+def search_callback(messages, error):
+    if error:
+        print(f"Error: {error}")
+    else:
+        print(f"Found {len(messages)} messages")
+ 
+zwylib.Requests.search_messages(peer_id=-12345, q="hello", callback=search_callback, limit=50)
+```
+
+
+* * *
+
+#### `reload_admins`[](#reload_admins)
+
+```
+Requests.reload_admins(chat_id: int) -> None
+```
+
+
+Reloads the list of administrators for a given chat.
+
+**Arguments**
+
+*   `chat_id` (`int`): ID of the chat to reload administrators for.
+
+**Example**
+
+```
+zwylib.Requests.reload_admins(chat_id=-12345)
+# Reloads admins for the specified chat
+```
+
+
+* * *
+
+#### `delete_messages`[](#delete_messages)
+
+```
+Requests.delete_messages(messages: List[int], peer_id: int, topic_id: Optional[int] = None) -> None
+```
+
+
+Deletes a list of messages from a peer, optionally within a specific topic.
+
+**Arguments**
+
+*   `messages` (`List[int]`): List of message IDs to delete.
+*   `peer_id` (`int`): ID of the peer (chat or user) containing the messages.
+*   `topic_id` (`Optional[int]`, default `None`): ID of the topic, if applicable. If `None`, no topic is specified.
+
+**Example**
+
+```
+zwylib.Requests.delete_messages(messages=[67890, 67891], peer_id=-12345, topic_id=100)
+# Deletes specified messages from the chat
+```
+
+
+* * *
+
+#### `unban`[](#unban)
+
+```
+Requests.unban(
+    chat_id: int,
+    target_peer_id: int,
+    callback: Optional[(TLRPC.Updates | None, TLRPC.TL_error | None) -> None] = None,
+    delay: int = 0,
+    **kwargs
+) -> None
+```
+
+
+Removes a ban from a user in a chat, effectively granting them default permissions. Additional parameters should be passed as keyword arguments matching the TL schema .
+
+**Arguments**
+
+*   `chat_id` (`int`): ID of the chat to unban the user from.
+*   `target_peer_id` (`int`): ID of the user to unban.
+*   `callback` (`Optional[(TLRPC.Updates | None, TLRPC.TL_error | None) -> None]`, default `None`): Function called with the update result (or `None`) and an error (or `None`).
+*   `delay` (`int`, default `0`): Delay in seconds before sending the request.
+*   `**kwargs`: Additional parameters matching the TL schema.
+
+**Example**
+
+```
+def unban_callback(updates, error):
+    if error:
+        print(f"Error: {error}")
+    else:
+        print("User unbanned")
+ 
+zwylib.Requests.unban(chat_id=-12345, target_peer_id=123456, callback=unban_callback)
+```
+
+
+* * *
+
+#### `change_slowmode`[](#change_slowmode)
+
+```
+Requests.change_slowmode(
+    seconds: int,
+    chat_id: int,
+    callback: Optional[(TLRPC.Updates | None, TLRPC.TL_error | None) -> None] = None,
+    delay: int = 0,
+    **kwargs
+) -> None
+```
+
+
+Changes the slow mode duration for a chat. Additional parameters should be passed as keyword arguments matching the TL schema .
+
+**Arguments**
+
+*   `seconds` (`int`): Number of seconds for the slow mode delay (0 to disable).
+*   `chat_id` (`int`): ID of the chat to modify.
+*   `callback` (`Optional[(TLRPC.Updates | None, TLRPC.TL_error | None) -> None]`, default `None`): Function called with the update result (or `None`) and an error (or `None`).
+*   `delay` (`int`, default `0`): Delay in seconds before sending the request.
+*   `**kwargs`: Additional parameters matching the TL schema.
+
+**Example**
+
+```
+def slowmode_callback(updates, error):
+    if error:
+        print(f"Error: {error}")
+    else:
+        print("Slow mode updated")
+ 
+zwylib.Requests.change_slowmode(seconds=30, chat_id=-12345, callback=slowmode_callback)
+```
+
+
+* * *
+
+#### `get_message`[](#get_message)
+
+```
+Requests.get_message(
+    peer_id: int,
+    message_id: int,
+    callback: Optional[(Union[TLRPC.TL_message, TLRPC.TL_messageEmpty, None]) -> None] = None,
+    get_msg_tries_limit: int = 10,
+    wait_time_seconds: int = 1
+) -> None
+```
+
+
+Asynchronously reloads a specific message from the server and retrieves it from local storage, passing it to the callback. Retries up to `get_msg_tries_limit` times if the message is not yet available.
+
+**Arguments**
+
+*   `peer_id` (`int`): ID of the peer (chat or user) containing the message.
+*   `message_id` (`int`): ID of the message to retrieve.
+*   `callback` (`Optional[(Union[TLRPC.TL_message, TLRPC.TL_messageEmpty, None]) -> None]`, default `None`): Function called with the message (or `None`) when retrieved.
+*   `get_msg_tries_limit` (`int`, default `10`): Maximum number of retry attempts.
+*   `wait_time_seconds` (`int`, default `1`): Delay between retry attempts in seconds.
+
+**Example**
+
+```
+def message_callback(msg):
+    if msg:
+        print(f"Message: {msg.message}")
+    else:
+        print("Message not found")
+ 
+zwylib.Requests.get_message(peer_id=-12345, message_id=67890, callback=message_callback)
+```
+
+
+* * *
+
+#### `ban`[](#ban)
+
+```
+Requests.ban(
+    chat_id: int,
+    peer_id: int,
+    until_date: Optional[int] = None,
+    **kwargs
+) -> None
+```
+
+
+Bans a user in a chat by setting all permissions to restricted, optionally with an expiration date. Additional parameters should be passed as keyword arguments matching the TL schema .
+
+**Arguments**
+
+*   `chat_id` (`int`): ID of the chat to ban the user in.
+*   `peer_id` (`int`): ID of the user to ban.
+*   `until_date` (`Optional[int]`, default `None`): Unix timestamp when the ban expires (0 or `None` for permanent).
+*   `**kwargs`: Additional parameters matching the TL schema.
+
+**Example**
+
+```
+zwylib.Requests.ban(chat_id=-12345, peer_id=123456, until_date=1696118400)
+# Bans the user in the specified chat until the given date
+```
+
+
+* * *
+
+#### `get_chat_participant`[](#get_chat_participant)
+
+```
+Requests.get_chat_participant(
+    chat_id: int,
+    target_peer_id: int,
+    callback: (TLRPC.Updates | None, TLRPC.TL_error | None) -> None,
+    **kwargs
+) -> None
+```
+
+
+Fetches information about a specific participant in a chat and passes the result to the provided callback. Additional parameters should be passed as keyword arguments matching the TL schema .
+
+**Arguments**
+
+*   `chat_id` (`int`): ID of the chat to fetch the participant from.
+*   `target_peer_id` (`int`): ID of the participant to fetch.
+*   `callback` (`(TLRPC.Updates | None, TLRPC.TL_error | None) -> None`): Function called with the participant information (or `None`) and an error (or `None`).
+*   `**kwargs`: Additional parameters matching the TL schema.
+
+**Example**
+
+```
+def participant_callback(updates, error):
+    if error:
+        print(f"Error: {error}")
+    else:
+        print("Participant info retrieved")
+ 
+zwylib.Requests.get_chat_participant(chat_id=-12345, target_peer_id=123456, callback=participant_callback)
+```
