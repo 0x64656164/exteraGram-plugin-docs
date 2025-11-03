@@ -1,0 +1,257 @@
+"""
+# В целях оптимизации и в связи с ограничениями Android,
+# Основная часть кода написана на Java и загружается с помощью технологии InMemoryDexClassLoader.
+# Актуальный исходный код плагина можно найти на GitHub: https://github.com/Hazzz895/ExteraPluginsAssets/blob/main/lyrics/dex/src/main/
+# 
+# ==== По поводу форков: ====
+# Любой метод из Java кода можно хукнуть через Xposed хуки (в точности как и обычные тг методы).
+# Если вам необходимо изменить Java код, то создайте форк на Github и измените ссылку DEX_URL на свою.
+# О том как скомпилировать .dex: https://github.com/dextestv/DexSystem/blob/main/doc.md
+# ============================
+#
+# Спасибо за использование плагина.
+"""
+
+# =============== константы ======================
+# ссылка на .dex (Java код плагина)
+DEX_URL = "https://github.com/Hazzz895/ExteraPluginsAssets/raw/refs/heads/main/lyrics/dex/classes.dex"
+
+# шрифт который используется в синхронизированных текстах. измените любое из значений на None, чтобы не скачивать.
+FONT_DOWNLOAD_URL = "https://github.com/Hazzz895/ExteraPluginsAssets/raw/refs/heads/main/lyrics/fonts/YandexSansText-Bold.ttf"
+FONT_FILE_NAME = "YandexSansText-Bold.ttf"
+
+# пространство имен класса для LyricsController
+CONTROLLER_CLASS_NAME = "com.pessdes.lyrics.components.lrclib.LyricsController"
+
+# id кнопки
+SHOW_LYRICS_ITEM_ID = 6767
+# ================================================
+
+__module_name__ = __name__
+__id__ = "lyrics"
+__name__ = "Reach Text"
+__description__ = 'Displays lyrics for your music directly in Telegram.\nAdds a "Show Lyrics" button to the audio player, with support for synchronized (karaoke-style) lyrics.\nPowered by LRCLib.net'
+__author__ = "@PESSDES_Plugins"
+__min_version__ = "11.12.1"
+__icon__ = "VoiceToText7/12"
+__version__ = "1.0" 
+
+from android.graphics import Typeface
+from base_plugin import BasePlugin, MethodHook
+from client_utils import get_last_fragment, run_on_queue, get_media_controller
+from dalvik.system import InMemoryDexClassLoader
+from hook_utils import get_private_field, find_class
+from java.io import File
+from java.lang import Boolean, Integer
+from java.util import Locale
+from java.nio import ByteBuffer
+from org.telegram.messenger import ApplicationLoader, MessageObject
+from org.telegram.ui.ActionBar import ActionBarMenuItem
+from org.telegram.ui.Components import AudioPlayerAlert
+from ui.bulletin import BulletinHelper
+import os
+import requests
+
+LyricsController = None # LyricsController - главный класс через который и построена связь между .dex и Python
+
+class LocaleController:
+    def __init__(self):
+        self.language = Locale.getDefault().getLanguage()
+        self.language = self.language if self.language in self._get_supported_languages() else "en"
+        
+    def get_string(self, string_key):
+        return self.strings[self.language].get(string_key, self.strings["en"].get(string_key, string_key))
+
+    def _get_supported_languages(self):
+        return self.strings.keys() 
+    
+    def __getitem__(self, key):
+        return self.get_string(key)
+    
+    strings = {
+        "en": {
+            "ShowLyrics": "Show Lyrics",
+            "FetchingLyrics": "Fetching Lyrics...",
+            "LyricsNotFound": "Lyrics not found",
+        },
+        "ru": {
+            "ShowLyrics": "Показать текст",
+            "FetchingLyrics": "Получаю текст...",
+            "LyricsNotFound": "Текст не найден"
+        },
+        "de": {
+            "ShowLyrics": "Songtext anzeigen",
+            "FetchingLyrics": "Songtext wird abgerufen...",
+            "LyricsNotFound": "Songtext nicht gefunden"
+        },
+        "es": {
+            "ShowLyrics": "Mostrar letra",
+            "FetchingLyrics": "Obteniendo la letra...",
+            "LyricsNotFound": "Letra no encontrada"
+        },
+        "fr": {
+            "ShowLyrics": "Afficher les paroles",
+            "FetchingLyrics": "Récupération des paroles...",
+            "LyricsNotFound": "Paroles non trouvées"
+        },
+        "it": {
+            "ShowLyrics": "Mostra il testo",
+            "FetchingLyrics": "Recupero il testo...",
+            "LyricsNotFound": "Testo non trovato"
+        },
+        "pt": {
+            "ShowLyrics": "Mostrar a letra",
+            "FetchingLyrics": "Buscando a letra...",
+            "LyricsNotFound": "Letra não encontrada"
+        },
+        "zh": {
+            "ShowLyrics": "显示歌词",
+            "FetchingLyrics": "正在获取歌词...",
+            "LyricsNotFound": "未找到歌词"
+        },
+        "ja": {
+            "ShowLyrics": "歌詞を表示",
+            "FetchingLyrics": "歌詞を取得中...",
+            "LyricsNotFound": "歌詞が見つかりません"
+        },
+        "uk": {
+            "ShowLyrics": "Показати текст",
+            "FetchingLyrics": "Отримання тексту...",
+            "LyricsNotFound": "Текст не знайдено"
+        },
+        "pl": {
+            "ShowLyrics": "Pokaż tekst",
+            "FetchingLyrics": "Pobieranie tekstu...",
+            "LyricsNotFound": "Nie znaleziono tekstu"
+        },
+        "ko": {
+            "ShowLyrics": "가사 보기",
+            "FetchingLyrics": "가사 불러오는 중...",
+            "LyricsNotFound": "가사를 찾을 수 없습니다"
+        },
+        "ar": {
+            "ShowLyrics": "إظهار الكلمات",
+            "FetchingLyrics": "جارٍ جلب الكلمات...",
+            "LyricsNotFound": "لم يتم العثور على الكلمات"
+        }
+    }
+
+locale_controller = LocaleController()
+
+class Plugin(BasePlugin):
+    font_file_path = None
+
+    def __init__(self) -> None:
+        self.font_file_path = self.get_font_path()
+
+    def on_plugin_load(self) -> None:
+        self.hook_method(AudioPlayerAlert.getClass().getDeclaredConstructors()[0], AudioPlayerAlertHook())
+        self.hook_method(AudioPlayerAlert.getClass().getDeclaredMethod("updateTitle", Boolean.TYPE), UpdateHook())
+        self.hook_method(AudioPlayerAlert.getClass().getDeclaredMethod("onSubItemClick", Integer.TYPE), SubItemClickHook())
+
+        run_on_queue(self.load_dex)
+
+        if FONT_DOWNLOAD_URL is not None and FONT_FILE_NAME is not None:
+            run_on_queue(self.download_font)
+
+    # шрифт который будет применен на синхронизированный текст.
+    typeface = None
+
+    @staticmethod
+    def get_font_path():
+        dir = File(ApplicationLoader.applicationContext.getExternalCacheDir(), __id__) # Директория кэша прилоежния
+        if not dir.exists():
+            dir.mkdirs()
+        path = File(dir, FONT_FILE_NAME).getAbsolutePath()
+        return path
+
+    def download_font(self):
+        """ Скачивает шрифт и вызывает on_font_downloaded() по завершению """
+        if not os.path.exists(self.font_file_path):
+            response = requests.get(FONT_DOWNLOAD_URL)
+            response.raise_for_status()
+            with open(self.font_file_path, "wb") as file:
+                file.write(response.content)
+        
+        self.on_font_downloaded()
+    
+    def on_font_downloaded(self):
+        """ Вызывается после скачивания шрифта """
+        self.typeface = Typeface.createFromFile(self.get_font_path())
+        if LyricsController:
+            LyricsController.setTypeface(self.typeface)
+
+    def load_dex(self):
+        """ Загружает .dex по ссылке и создает экземпляр LyricsController """
+        global LyricsController
+        try:
+            lyrics_controller_class = None
+
+            try:
+                lyrics_controller_class = find_class(CONTROLLER_CLASS_NAME).getClass()
+            except:
+                pass
+
+            if not lyrics_controller_class:
+                self.log("LyricsController class not found, downloading DEX...")
+                response = requests.get(DEX_URL)
+                response.raise_for_status()  
+                dex_bytes = response.content
+                
+                app_class_loader = ApplicationLoader.applicationContext.getClassLoader()
+                dex_loader = InMemoryDexClassLoader(ByteBuffer.wrap(dex_bytes), app_class_loader)
+                lyrics_controller_class = dex_loader.loadClass(CONTROLLER_CLASS_NAME)
+            
+            LyricsController = lyrics_controller_class.getDeclaredMethod("getInstance").invoke(None)
+            self.on_lyrics_controller_loaded()
+        except Exception as e:
+            self.log(f"Failed to load LyricsController: {e}")
+            BulletinHelper.show_error("Failed to load LyricsController!")
+
+    def on_lyrics_controller_loaded(self):
+        """ Вызывается после загрузки LyricsController """
+        LyricsController.initPluginController(__module_name__)
+        if self.typeface:
+            LyricsController.setTypeface(self.typeface)
+
+def is_music() -> bool:
+    playing_message_object: MessageObject = get_media_controller().getInstance().getPlayingMessageObject()
+    return playing_message_object.isMusic()
+
+class AudioPlayerAlertHook(MethodHook):
+    """ Вызывается при создании AudioPlayerAlert """
+
+    def after_hooked_method(self, param):
+        optionsButton: ActionBarMenuItem = get_private_field(param.thisObject, "optionsButton")
+        optionsButton.addSubItem(
+            SHOW_LYRICS_ITEM_ID, 
+            TelegramUtils.get_icon_id("msg_photo_text2"),
+            locale_controller["ShowLyrics"]
+        )
+        optionsButton.setSubItemShown(SHOW_LYRICS_ITEM_ID, is_music())
+
+class UpdateHook(MethodHook):
+    """ Вызывается при обновлении AudioPlayerAlert """
+
+    def after_hooked_method(self, param):
+        optionsButton: ActionBarMenuItem = get_private_field(param.thisObject, "optionsButton")
+        optionsButton.setSubItemShown(SHOW_LYRICS_ITEM_ID, is_music())
+
+class SubItemClickHook(MethodHook):
+    """ Вызывается при нажатии на кнопку "Текст трека" """
+
+    def before_hooked_method(self, param):
+        if param.args[0] != SHOW_LYRICS_ITEM_ID:
+            return
+        elif LyricsController is None:
+            BulletinHelper.show_error(".dex is not loaded! Try to restart the plugin")
+            return
+        
+        param.setResult(None)
+        LyricsController.presentLyricsActivity(get_last_fragment())
+
+class TelegramUtils:
+    @staticmethod
+    def get_icon_id(name: str) -> int:
+        context = get_last_fragment().getContext()
+        return context.getResources().getIdentifier(name, "drawable", context.getPackageName())

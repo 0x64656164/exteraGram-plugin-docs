@@ -1,0 +1,590 @@
+__id__ = "log_overlay_by_rn"
+__name__ = "LogOverlay"
+__author__ = "@RooniPlugin (with @PluginIDE)"
+__version__ = "1.0.3"
+__description__ = """Convenient display of logs for developers. With the function of collapsing, expanding and more. Activation in the menu in the list of chats or by a command configured in the settings.
+
+Удобное отображение логов, для разработчиков. С функцией сворачивания, разворачивания и другого.
+Активация в меню в списке чатов или командой, настраиваемой в настройках."""
+
+# сгенерировано в Plugin IDE
+__icon__ = "sPluginIDE/32"
+__min_version__ = "11.12.0"
+
+import time
+import traceback
+import re
+from typing import Any, List, Tuple
+from base_plugin import BasePlugin, MenuItemData, MenuItemType, HookResult, HookStrategy, MethodHook
+from android_utils import run_on_ui_thread, log
+from hook_utils import find_class
+from client_utils import get_last_fragment
+from java import dynamic_proxy
+from java.util import Locale
+from android.content import Context
+from ui.bulletin import BulletinHelper
+from ui.alert import AlertDialogBuilder
+from ui.settings import Header, Input, Divider
+from org.telegram.messenger import AndroidUtilities
+
+# Милый котик следит за логами: =^.^=
+
+def tr(key: str, **kwargs) -> str:
+    """ Функция для локализации строк. """
+    lang = Locale.getDefault().getLanguage()
+    strings = {
+        'ru': {
+            "toggle_logs": "Показать/скрыть логи",
+            "plugin_loaded": "Плагин LogOverlay запущен! =^.^=",
+            "apputils_not_found": "Класс AppUtils не найден",
+            "hook_failed": "Не удалось установить хук на AppUtils.logInternal",
+            "log_hook_error": "Ошибка хука логов: {e}",
+            "overlay_open_error": "Ошибка открытия оверлея: {e}",
+            "permission_needed": "Требуется разрешение на показ поверх других окон",
+            "search_hint": "Поиск по логам...",
+            "header_title": "🐞 Логи",
+            "settings": "Настройки",
+            "minimize": "Свернуть",
+            "close": "Закрыть",
+            "autoscroll_on": "Автопрокрутка включена",
+            "autoscroll_off": "Автопрокрутка выключена",
+            "logs_paused": "Логи на паузе",
+            "logs_resumed": "Логи возобновлены",
+            "logs_cleared": "Логи очищены",
+            "nothing_to_copy": "Нечего копировать",
+            "all_logs_copied": "Все логи скопированы",
+            "settings_header": "Настройки оверлея логов",
+            "command_label": "Команда для вызова",
+            "font_size_label": "Размер шрифта в логах",
+            "log_limit_label": "Лимит логов в памяти",
+            "log_limit_subtext": "Макс. кол-во логов. Уменьшите, если лагает.",
+            "made_in": "Сделано в PluginIDE (@PluginIDE) ✨",
+            "find_plugin_error": "Не удалось найти плагин с ID: {id}",
+            "find_fragment_error": "Не удалось найти текущий фрагмент",
+            "settings_error": "Ошибка настроек: {e}",
+        },
+        'en': {
+            "toggle_logs": "Show/hide logs",
+            "plugin_loaded": "LogOverlay plugin started! =^.^=",
+            "apputils_not_found": "AppUtils class not found",
+            "hook_failed": "Failed to set hook on AppUtils.logInternal",
+            "log_hook_error": "Log hook error: {e}",
+            "overlay_open_error": "Overlay open error: {e}",
+            "permission_needed": "Overlay permission is required",
+            "search_hint": "Search logs...",
+            "header_title": "🐞 Logs",
+            "settings": "Settings",
+            "minimize": "Minimize",
+            "close": "Close",
+            "autoscroll_on": "Autoscroll enabled",
+            "autoscroll_off": "Autoscroll disabled",
+            "logs_paused": "Logs paused",
+            "logs_resumed": "Logs resumed",
+            "logs_cleared": "Logs cleared",
+            "nothing_to_copy": "Nothing to copy",
+            "all_logs_copied": "All logs copied",
+            "settings_header": "Log Overlay Settings",
+            "command_label": "Command to invoke",
+            "font_size_label": "Log font size",
+            "log_limit_label": "Log limit in memory",
+            "log_limit_subtext": "Max log count. Decrease if it lags.",
+            "made_in": "Made in PluginIDE (@PluginIDE) ✨",
+            "find_plugin_error": "Could not find plugin with ID: {id}",
+            "find_fragment_error": "Could not find current fragment",
+            "settings_error": "Settings error: {e}",
+        }
+    }
+    lang_dict = strings.get('ru' if lang.startswith('ru') else 'en')
+    return lang_dict.get(key, key).format(**kwargs)
+
+def to_signed_32(val: int) -> int:
+    """ Конвертирует беззнаковое 32-битное целое в знаковое, как того требует Java. """
+    return val if val < 0x80000000 else val - 0x100000000
+
+class LogOverlayPlugin(BasePlugin):
+    # --- Динамически загружаемые классы Android ---
+    WindowManager, LayoutParams, Gravity, LinearLayout, ScrollView, TextView, Button, View = (None,) * 8
+    OnClickListener, OnTouchListener, MotionEvent, ClipboardManager, GradientDrawable, Point, RelativeLayout = (None,) * 7
+    PixelFormat, Build_VERSION, Settings, Intent, Uri, ApplicationLoader, ClipData = (None,) * 7
+    InputMethodManager, AlphaAnimation, Animation, Html, EditText, TextWatcher, RippleDrawable, ColorStateList = (None,) * 8
+    DecelerateInterpolator, AccelerateInterpolator, OvershootInterpolator, Runnable = (None,) * 4
+    PluginsController, PluginSettingsActivity = (None, ) * 2
+
+    # --- Состояние плагина ---
+    full_logs = []
+    pi_hooks = [] # Список для хранения ссылок на хуки
+    is_overlay_open = False
+    is_minimized = False
+    auto_scroll_enabled = True
+    logs_paused = False
+
+    overlay_view, minimized_button, window_manager, log_text_view, scroll_view, search_field = (None,) * 6
+    autoscroll_button, pause_button = (None,) * 2
+
+    last_minimized_pos = (50, 200)
+    initial_view_x, initial_view_y, initial_touch_x, initial_touch_y = 0, 0, 0.0, 0.0
+    initial_width, initial_height = 0, 0
+
+    # --- Константы для изменения размера ---
+    MIN_WIDTH_DP = 280
+    MIN_HEIGHT_DP = 200
+    RESIZE_HANDLE_SIZE_DP = 25
+    DRAG_THRESHOLD_DP = 10
+
+    class RunnableProxy(dynamic_proxy(find_class("java.lang.Runnable"))):
+        def __init__(self, func):
+            super().__init__()
+            self.func = func
+        def run(self):
+            try:
+                self.func()
+            except Exception as e:
+                log(f"LogOverlayPlugin RunnableProxy Error: {e}")
+
+    class AppLogHook(MethodHook):
+        """ Класс-хук для перехвата вызовов логирования AppUtils. """
+        def __init__(self, plugin):
+            super().__init__()
+            self.plugin = plugin
+
+        def before_hooked_method(self, param: Any):
+            try:
+                message = str(param.args[0])
+                level_int = int(param.args[2])
+                level_map = {0: "DEBUG", 1: "INFO", 2: "WARN", 3: "ERROR"}
+                level_str = level_map.get(level_int, "UNKNOWN")
+                self.plugin.log_to_overlay(message, level_str)
+            except Exception as e:
+                log(f"LogOverlayPlugin Hook Error: {e}\n{traceback.format_exc()}")
+
+    def on_plugin_load(self):
+        self.load_android_classes()
+        self._hook_telegram_logs()
+        self.add_menu_item(MenuItemData(
+            menu_type=MenuItemType.DRAWER_MENU,
+            text=tr("toggle_logs"),
+            icon="msg_info",
+            on_click=lambda ctx: self.toggle_overlay()
+        ))
+        self.add_on_send_message_hook()
+        self.log_to_overlay(tr("plugin_loaded"), "INFO")
+
+    def on_plugin_unload(self):
+        self.close_overlay()
+        for unhook in self.pi_hooks:
+            try:
+                unhook.unhook()
+            except Exception as e:
+                log(f"LogOverlayPlugin: Ошибка при снятии хука: {e}")
+        self.pi_hooks.clear()
+
+    def load_android_classes(self):
+        if self.__class__.WindowManager: return
+        classes_to_load = {
+            "WindowManager": "android.view.WindowManager", "LayoutParams": "android.view.WindowManager$LayoutParams",
+            "Gravity": "android.view.Gravity", "View": "android.view.View", "MotionEvent": "android.view.MotionEvent",
+            "LinearLayout": "android.widget.LinearLayout", "RelativeLayout": "android.widget.RelativeLayout",
+            "ScrollView": "android.widget.ScrollView", "TextView": "android.widget.TextView", "EditText": "android.widget.EditText",
+            "Button": "android.widget.Button", "OnClickListener": "android.view.View$OnClickListener",
+            "OnTouchListener": "android.view.View$OnTouchListener", "ClipboardManager": "android.content.ClipboardManager",
+            "ClipData": "android.content.ClipData", "GradientDrawable": "android.graphics.drawable.GradientDrawable",
+            "Point": "android.graphics.Point", "PixelFormat": "android.graphics.PixelFormat",
+            "Build_VERSION": "android.os.Build$VERSION", "Settings": "android.provider.Settings",
+            "Intent": "android.content.Intent", "Uri": "android.net.Uri",
+            "ApplicationLoader": "org.telegram.messenger.ApplicationLoader", "InputMethodManager": "android.view.input.InputMethodManager",
+            "Html": "android.text.Html", "TextWatcher": "android.text.TextWatcher", "AlphaAnimation": "android.view.animation.AlphaAnimation",
+            "Animation": "android.view.animation.Animation", "RippleDrawable": "android.graphics.drawable.RippleDrawable",
+            "ColorStateList": "android.content.res.ColorStateList", "DecelerateInterpolator": "android.view.animation.DecelerateInterpolator",
+            "AccelerateInterpolator": "android.view.animation.AccelerateInterpolator", "OvershootInterpolator": "android.view.animation.OvershootInterpolator",
+            "Runnable": "java.lang.Runnable",
+            "PluginsController": "com.exteragram.messenger.plugins.PluginsController",
+            "PluginSettingsActivity": "com.exteragram.messenger.plugins.ui.PluginSettingsActivity"
+        }
+        for name, path in classes_to_load.items():
+            setattr(self.__class__, name, find_class(path))
+
+    def _hook_telegram_logs(self):
+        try:
+            AppUtils = find_class("com.exteragram.messenger.utils.AppUtils")
+            if not AppUtils:
+                self.log_to_overlay(tr("apputils_not_found"), "ERROR"); return
+
+            IntegerType = find_class("java.lang.Integer").TYPE
+            String = find_class("java.lang.String")
+            Throwable = find_class("java.lang.Throwable")
+
+            method_to_hook = AppUtils.getClass().getDeclaredMethod("logInternal", String, Throwable, IntegerType)
+            method_to_hook.setAccessible(True)
+
+            handler = self.AppLogHook(self)
+            unhook = self.hook_method(method_to_hook, handler)
+            if unhook: self.pi_hooks.append(unhook)
+            else: self.log_to_overlay(tr("hook_failed"), "ERROR")
+        except Exception as e:
+            self.log_to_overlay(tr("log_hook_error", e=e), "ERROR")
+            log(f"LogOverlayPlugin: Не удалось установить хуки: {e}\n{traceback.format_exc()}")
+
+    def log_to_overlay(self, message: str, level: str = "INFO"):
+        color_map = {"ERROR": "#F44336", "WARN": "#FFC107", "DEBUG": "#03A9F4", "INFO": "#4CAF50"}
+        color = color_map.get(level, "#FFFFFF")
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        
+        safe_message = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        
+        log_entry = f'<font color="{color}"><b>[{timestamp}][{level}]</b></font> {safe_message}'
+        self.full_logs.append(log_entry)
+
+        limit = int(self.get_setting("log_limit", "200"))
+        if len(self.full_logs) > limit:
+            self.full_logs = self.full_logs[-limit:]
+
+        if self.is_overlay_open and not self.is_minimized and not self.logs_paused:
+            run_on_ui_thread(self._filter_and_update_logs)
+
+    def _filter_and_update_logs(self):
+        if not self.log_text_view: return
+        search_term = str(self.search_field.getText()).lower() if self.search_field else ""
+        
+        if search_term:
+            final_logs = [log_line for log_line in self.full_logs if search_term in log_line.lower()]
+        else:
+            final_logs = self.full_logs
+            
+        html_text = self.Html.fromHtml("<br>".join(final_logs), self.Html.FROM_HTML_MODE_LEGACY)
+        self.log_text_view.setText(html_text)
+
+        if self.auto_scroll_enabled and not search_term and self.scroll_view:
+            self.scroll_view.post(self.RunnableProxy(lambda: self.scroll_view.fullScroll(self.View.FOCUS_DOWN)))
+
+    def _create_overlay_view(self, context: Context):
+        root_layout = self.RelativeLayout(context)
+        root_bg = self._create_rounded_drawable(to_signed_32(0xEE212121), 30, 2, to_signed_32(0xFF555555))
+        root_layout.setBackground(root_bg)
+        root_layout.setFocusableInTouchMode(True)
+        root_layout.setOnTouchListener(self._create_drag_and_resize_listener())
+        
+        content_container = self.LinearLayout(context)
+        content_container.setOrientation(self.LinearLayout.VERTICAL)
+
+        header_bar = self.LinearLayout(context)
+        header_bar.setOrientation(self.LinearLayout.HORIZONTAL)
+        header_bar.setGravity(self.Gravity.CENTER_VERTICAL)
+        header_bar.setPadding(20, 10, 20, 10)
+
+        drag_handle = self.TextView(context); drag_handle.setText(tr("header_title"))
+        drag_handle.setTextColor(to_signed_32(0xFFFFFFFF)); drag_handle.setTextSize(18)
+        header_bar.addView(drag_handle)
+
+        spacer = self.View(context)
+        header_bar.addView(spacer, self.LinearLayout.LayoutParams(0, 0, 1.0))
+        
+        btn_settings = self._create_icon_button(context, "⚙️", self._open_plugin_settings)
+        btn_minimize = self._create_icon_button(context, "➖", self.minimize_overlay)
+        btn_close = self._create_icon_button(context, "❌", self.close_overlay)
+        header_bar.addView(btn_settings)
+        header_bar.addView(btn_minimize)
+        header_bar.addView(btn_close)
+        content_container.addView(header_bar)
+        
+        self.search_field = self.EditText(context)
+        self.search_field.setHint(tr("search_hint")); self.search_field.setHintTextColor(to_signed_32(0xFFCCCCCC))
+        self.search_field.setTextColor(to_signed_32(0xFFFFFFFF)); self.search_field.setBackground(self._create_rounded_drawable(to_signed_32(0x55000000), 20))
+        self.search_field.setPadding(25, 15, 25, 15)
+        search_params = self.LinearLayout.LayoutParams(-1, -2); search_params.setMargins(20, 0, 20, 10)
+        content_container.addView(self.search_field, search_params)
+
+        self.scroll_view = self.ScrollView(context)
+        self.log_text_view = self.TextView(context)
+        self.log_text_view.setPadding(25, 5, 25, 25); self.log_text_view.setTextColor(to_signed_32(0xFFFFFFFF))
+        self.log_text_view.setTextIsSelectable(True); self.log_text_view.setTextSize(float(self.get_setting("log_font_size", "12")))
+        self.scroll_view.addView(self.log_text_view)
+        content_container.addView(self.scroll_view, self.LinearLayout.LayoutParams(-1, 0, 1.0))
+
+        bottom_bar = self.LinearLayout(context); bottom_bar.setGravity(self.Gravity.CENTER); bottom_bar.setPadding(10, 10, 10, 10)
+        self.pause_button = self._create_icon_button(context, "⏸️", self._toggle_log_pause)
+        self.autoscroll_button = self._create_icon_button(context, "⏬", self._toggle_autoscroll)
+        btn_clear = self._create_icon_button(context, "🗑️", self._clear_logs)
+        btn_copy = self._create_icon_button(context, "📋", self._copy_all_logs)
+        
+        bottom_bar.addView(self.pause_button); bottom_bar.addView(self.autoscroll_button)
+        bottom_bar.addView(btn_clear); bottom_bar.addView(btn_copy)
+        content_container.addView(bottom_bar, self.LinearLayout.LayoutParams(-1, -2))
+        
+        root_layout.addView(content_container, self.RelativeLayout.LayoutParams(-1, -1))
+        
+        resize_handle = self.TextView(context)
+        resize_handle.setText("⇲")
+        resize_handle.setTextColor(to_signed_32(0x99FFFFFF))
+        resize_handle.setTextSize(24)
+        
+        resize_params = self.RelativeLayout.LayoutParams(-2, -2)
+        resize_params.addRule(self.RelativeLayout.ALIGN_PARENT_RIGHT)
+        resize_params.addRule(self.RelativeLayout.ALIGN_PARENT_BOTTOM)
+        resize_params.setMargins(0, 0, AndroidUtilities.dp(5), AndroidUtilities.dp(5))
+        root_layout.addView(resize_handle, resize_params)
+
+        return root_layout
+
+    def open_overlay(self):
+        if self.is_overlay_open: return
+        def action():
+            try:
+                self.logs_paused = False
+                app_context = self.ApplicationLoader.applicationContext
+                if not app_context: return
+
+                if self.Build_VERSION.SDK_INT >= 23 and not self.Settings.canDrawOverlays(app_context):
+                    BulletinHelper.show_error(tr("permission_needed"))
+                    fragment = get_last_fragment()
+                    if fragment and fragment.getParentActivity():
+                        intent = self.Intent(self.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, self.Uri.parse("package:" + app_context.getPackageName()))
+                        fragment.getParentActivity().startActivity(intent)
+                    return
+
+                self.window_manager = app_context.getSystemService(Context.WINDOW_SERVICE)
+                if self.overlay_view is None: self.overlay_view = self._create_overlay_view(app_context)
+                self._filter_and_update_logs()
+                
+                display = self.window_manager.getDefaultDisplay(); size = self.Point(); display.getSize(size)
+                width, height = int(size.x * 0.9), int(size.y * 0.75)
+                
+                flags = self.LayoutParams.FLAG_NOT_TOUCH_MODAL | self.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                params = self.LayoutParams(width, height, self.LayoutParams.TYPE_APPLICATION_OVERLAY if self.Build_VERSION.SDK_INT >= 26 else self.LayoutParams.TYPE_PHONE,
+                                           flags, self.PixelFormat.TRANSLUCENT)
+                params.gravity = self.Gravity.CENTER
+                params.softInputMode = self.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                
+                self.window_manager.addView(self.overlay_view, params)
+                self.overlay_view.animate().alpha(1.0).scaleX(1.0).scaleY(1.0).setDuration(250).setInterpolator(self.OvershootInterpolator(1.0)).start()
+                self.is_overlay_open, self.is_minimized = True, False
+            except Exception as e:
+                self.is_overlay_open = False; log(f"Ошибка открытия оверлея: {e}\n{traceback.format_exc()}")
+                run_on_ui_thread(lambda: BulletinHelper.show_error(tr("overlay_open_error", e=e)))
+        run_on_ui_thread(action)
+
+    def close_overlay(self):
+        if not self.is_overlay_open: return
+        view_to_animate = self.minimized_button if self.is_minimized else self.overlay_view
+        if not view_to_animate or not view_to_animate.isAttachedToWindow():
+            self._perform_close(); return
+        run_on_ui_thread(lambda: view_to_animate.animate().alpha(0.0).scaleX(0.9).scaleY(0.9).setDuration(200).withEndAction(self.RunnableProxy(self._perform_close)).start())
+
+    def _perform_close(self):
+        def action():
+            try:
+                if self.window_manager:
+                    if self.overlay_view and self.overlay_view.isAttachedToWindow(): self.window_manager.removeView(self.overlay_view)
+                    if self.minimized_button and self.minimized_button.isAttachedToWindow(): self.window_manager.removeView(self.minimized_button)
+            except Exception as e: log(f"LogOverlayPlugin: Ошибка при закрытии: {e}")
+            finally:
+                self.overlay_view, self.minimized_button, self.is_overlay_open, self.is_minimized = None, None, False, False
+        run_on_ui_thread(action)
+
+    def minimize_overlay(self):
+        if not self.is_overlay_open or self.is_minimized: return
+        run_on_ui_thread(lambda: self._perform_minimize())
+
+    def _perform_minimize(self):
+        try:
+            if not self.window_manager or not self.overlay_view or not self.overlay_view.isAttachedToWindow():
+                self.close_overlay(); return
+
+            def on_minimize_end():
+                if self.overlay_view:
+                    self.overlay_view.setVisibility(self.View.GONE)
+                    if self.overlay_view.isAttachedToWindow():
+                        self.window_manager.removeView(self.overlay_view)
+
+            app_context = self.ApplicationLoader.applicationContext
+            minimized_bg = self._create_rounded_drawable([to_signed_32(0xAA8E24AA), to_signed_32(0xAA5E35B1)], 60)
+            self.minimized_button = self._create_icon_button(app_context, "🐞", self.maximize_overlay, 120, background=minimized_bg)
+            self.minimized_button.setOnTouchListener(self._create_drag_and_resize_listener(is_minimized_btn=True))
+            
+            min_params = self.LayoutParams(120, 120, self.LayoutParams.TYPE_APPLICATION_OVERLAY if self.Build_VERSION.SDK_INT >= 26 else self.LayoutParams.TYPE_PHONE,
+                                           self.LayoutParams.FLAG_NOT_FOCUSABLE | self.LayoutParams.FLAG_LAYOUT_NO_LIMITS, self.PixelFormat.TRANSLUCENT)
+            min_params.gravity = self.Gravity.TOP | self.Gravity.LEFT
+            min_params.x, min_params.y = self.last_minimized_pos
+            
+            self.minimized_button.setAlpha(0.0); self.minimized_button.setScaleX(0.0); self.minimized_button.setScaleY(0.0)
+            self.window_manager.addView(self.minimized_button, min_params)
+
+            self.minimized_button.animate().alpha(1.0).scaleX(1.0).scaleY(1.0).setDuration(300).setInterpolator(self.OvershootInterpolator()).start()
+            
+            self.overlay_view.animate().alpha(0.0).scaleX(0.0).scaleY(0.0).setDuration(300).setInterpolator(self.AccelerateInterpolator()).withEndAction(
+                self.RunnableProxy(on_minimize_end)
+            ).start()
+            
+            self.is_minimized = True
+        except Exception as e:
+            log(f"LogOverlayPlugin: Ошибка сворачивания: {e}\n{traceback.format_exc()}"); self.close_overlay()
+
+    def maximize_overlay(self):
+        if not self.is_overlay_open or not self.is_minimized: return
+        run_on_ui_thread(lambda: self._perform_maximize())
+
+    def _perform_maximize(self):
+        try:
+            if not all([self.window_manager, self.minimized_button, self.overlay_view]): self.close_overlay(); return
+            
+            if not self.overlay_view.isAttachedToWindow():
+                self.window_manager.addView(self.overlay_view, self.overlay_view.getLayoutParams())
+
+            self.overlay_view.setVisibility(self.View.VISIBLE)
+            self.overlay_view.setAlpha(0.0); self.overlay_view.setScaleX(0.0); self.overlay_view.setScaleY(0.0)
+            
+            self.overlay_view.animate().alpha(1.0).scaleX(1.0).scaleY(1.0).setDuration(300).setInterpolator(self.OvershootInterpolator()).start()
+            
+            self.minimized_button.animate().alpha(0.0).scaleX(0.0).scaleY(0.0).setDuration(300).setInterpolator(self.AccelerateInterpolator()).withEndAction(
+                 self.RunnableProxy(lambda: self.window_manager.removeView(self.minimized_button) if self.minimized_button and self.minimized_button.isAttachedToWindow() else None)
+            ).start()
+            
+            self.minimized_button = None
+            self.is_minimized = False
+        except Exception as e:
+            log(f"LogOverlayPlugin: Error maximizing: {e}\n{traceback.format_exc()}"); self.close_overlay()
+
+    def _clear_logs(self):
+        self.full_logs.clear()
+        if self.search_field: run_on_ui_thread(lambda: self.search_field.setText(""))
+        self._filter_and_update_logs()
+        BulletinHelper.show_info(tr("logs_cleared"))
+
+    def _copy_all_logs(self):
+        if not self.full_logs: BulletinHelper.show_info(tr("nothing_to_copy")); return
+        plain_logs = "\n".join([re.sub(r'<[^>]+>', '', log_line) for log_line in self.full_logs])
+        app_context = self.ApplicationLoader.applicationContext
+        clipboard = app_context.getSystemService(Context.CLIPBOARD_SERVICE)
+        clipboard.setPrimaryClip(self.ClipData.newPlainText("Logs", plain_logs))
+        BulletinHelper.show_copied_to_clipboard(tr("all_logs_copied"))
+
+    def _toggle_autoscroll(self):
+        self.auto_scroll_enabled = not self.auto_scroll_enabled
+        self.autoscroll_button.setText("⏬" if self.auto_scroll_enabled else "⛔")
+        BulletinHelper.show_info(tr("autoscroll_on") if self.auto_scroll_enabled else tr("autoscroll_off"))
+
+    def _toggle_log_pause(self):
+        self.logs_paused = not self.logs_paused
+        if self.pause_button: self.pause_button.setText("▶️" if self.logs_paused else "⏸️")
+        BulletinHelper.show_info(tr("logs_paused") if self.logs_paused else tr("logs_resumed"))
+        if not self.logs_paused: run_on_ui_thread(self._filter_and_update_logs)
+
+    def toggle_overlay(self):
+        self.close_overlay() if self.is_overlay_open else self.open_overlay()
+
+    def _open_plugin_settings(self):
+        def action():
+            try:
+                java_plugin = self.PluginsController.getInstance().plugins.get(self.id)
+                if java_plugin:
+                    fragment = get_last_fragment()
+                    if fragment: fragment.presentFragment(self.PluginSettingsActivity(java_plugin))
+                    else: BulletinHelper.show_error(tr("find_fragment_error"))
+                else: BulletinHelper.show_error(tr("find_plugin_error", id=self.id))
+            except Exception as e:
+                log(f"LogOverlayPlugin: Ошибка открытия настроек: {e}"); BulletinHelper.show_error(tr("settings_error", e=e))
+        run_on_ui_thread(action)
+
+    def create_settings(self):
+        return [
+            Header(text=tr("settings_header")),
+            Input(key="command", text=tr("command_label"), default=".logs", icon="input_bot1"),
+            Input(key="log_font_size", text=tr("font_size_label"), default="12", icon="msg_photo_text2"),
+            Input(key="log_limit", text=tr("log_limit_label"), default="200", subtext=tr("log_limit_subtext"), icon="msg_storageusage"),
+            Divider(tr("made_in"))]
+
+    def on_send_message_hook(self, acc: int, p: Any):
+        if getattr(p, 'message', '').strip().lower() == self.get_setting("command", ".logs"):
+            self.toggle_overlay(); return HookResult(strategy=HookStrategy.CANCEL)
+        return HookResult()
+
+    def _create_rounded_drawable(self, color_or_colors: Any, radius: float, stroke_width: int = 0, stroke_color: int = 0):
+        d = self.GradientDrawable()
+        if isinstance(color_or_colors, list): d.setColors([c for c in color_or_colors]); d.setOrientation(self.GradientDrawable.Orientation.TL_BR)
+        else: d.setColor(color_or_colors)
+        d.setCornerRadius(radius)
+        if stroke_width > 0: d.setStroke(stroke_width, stroke_color)
+        return d
+        
+    def _create_icon_button(self, context: Context, icon_text: str, on_click: callable, size: int = 90, background: Any = None):
+        btn = self.Button(context); btn.setText(icon_text); btn.setTextSize(18)
+        btn.setPadding(0, 0, 0, 0); btn.setIncludeFontPadding(False); btn.setGravity(self.Gravity.CENTER)
+        btn.setTextColor(to_signed_32(0xFFFFFFFF))
+        
+        content = background or self._create_rounded_drawable(to_signed_32(0x55000000), float(size / 2))
+        
+        if self.Build_VERSION.SDK_INT >= 21:
+            mask = self.GradientDrawable(); mask.setShape(self.GradientDrawable.OVAL); mask.setColor(to_signed_32(0xFF000000))
+            btn.setBackground(self.RippleDrawable(self.ColorStateList.valueOf(to_signed_32(0x40FFFFFF)), content, mask))
+        else: btn.setBackground(content)
+
+        class ClickListener(dynamic_proxy(self.OnClickListener)):
+            def __init__(self, plg, fn): super().__init__(); self.plugin = plg; self.fn = fn
+            def onClick(self, v): self.fn()
+        
+        btn.setOnClickListener(ClickListener(self, on_click))
+        params = self.LinearLayout.LayoutParams(size, size); params.setMargins(10, 5, 10, 5)
+        btn.setLayoutParams(params)
+        return btn
+
+    def _create_text_watcher(self):
+        class Watcher(dynamic_proxy(self.TextWatcher)):
+            def __init__(self, plg): super().__init__(); self.plugin = plg
+            def afterTextChanged(self, s): self.plugin._filter_and_update_logs()
+            def beforeTextChanged(self, s, st, c, a): pass
+            def onTextChanged(self, s, st, b, c): pass
+        return Watcher(self)
+
+    def _create_drag_and_resize_listener(self, is_minimized_btn=False):
+        class TouchListener(dynamic_proxy(self.OnTouchListener)):
+            def __init__(self, plugin, is_minimized):
+                super().__init__(); self.plugin = plugin; self.is_minimized = is_minimized
+                self.drag_mode = 0; self.was_dragged = False
+                self.DRAG_THRESHOLD = AndroidUtilities.dp(self.plugin.DRAG_THRESHOLD_DP)
+
+            def onTouch(self, v, event):
+                view = self.plugin.minimized_button if self.is_minimized else self.plugin.overlay_view
+                if not view or not self.plugin.window_manager: return False
+                
+                params = view.getLayoutParams()
+                action = event.getAction()
+                handle_size = AndroidUtilities.dp(self.plugin.RESIZE_HANDLE_SIZE_DP)
+                
+                if action == self.plugin.MotionEvent.ACTION_DOWN:
+                    self.plugin.initial_touch_x, self.plugin.initial_touch_y = event.getRawX(), event.getRawY()
+                    self.plugin.initial_view_x, self.plugin.initial_view_y = params.x, params.y
+                    self.plugin.initial_width, self.plugin.initial_height = params.width, params.height
+                    self.was_dragged = False
+                    
+                    if self.is_minimized: self.drag_mode = 1
+                    elif event.getX() > view.getWidth() - handle_size and event.getY() > view.getHeight() - handle_size: self.drag_mode = 2
+                    else: self.drag_mode = 1
+                    return True
+                
+                elif action == self.plugin.MotionEvent.ACTION_MOVE:
+                    dx = event.getRawX() - self.plugin.initial_touch_x
+                    dy = event.getRawY() - self.plugin.initial_touch_y
+                    
+                    if not self.was_dragged and (abs(dx) > self.DRAG_THRESHOLD or abs(dy) > self.DRAG_THRESHOLD):
+                        self.was_dragged = True
+
+                    if self.was_dragged:
+                        if self.drag_mode == 1:
+                            params.x = self.plugin.initial_view_x + int(dx)
+                            params.y = self.plugin.initial_view_y + int(dy)
+                            self.plugin.window_manager.updateViewLayout(view, params)
+                        elif self.drag_mode == 2:
+                            min_w, min_h = AndroidUtilities.dp(self.plugin.MIN_WIDTH_DP), AndroidUtilities.dp(self.plugin.MIN_HEIGHT_DP)
+                            params.width = max(min_w, self.plugin.initial_width + int(dx))
+                            params.height = max(min_h, self.plugin.initial_height + int(dy))
+                            self.plugin.window_manager.updateViewLayout(view, params)
+                    return True
+
+                elif action == self.plugin.MotionEvent.ACTION_UP:
+                    if not self.was_dragged:
+                        if self.is_minimized: self.plugin.maximize_overlay()
+                    
+                    if self.is_minimized: self.plugin.last_minimized_pos = (params.x, params.y)
+                    self.drag_mode = 0
+                    return True
+                return False
+        return TouchListener(self, is_minimized_btn)
